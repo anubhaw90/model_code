@@ -1,0 +1,141 @@
+import tensorflow
+import keras
+
+#import keras utilities
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.models import Sequential
+from keras.layers import Dense, Flatten, LSTM, Conv1D, MaxPooling1D, Dropout, Activation
+from keras.layers.embeddings import Embedding
+from keras.utils import to_categorical
+import os
+from os import environ
+# from keras.callbacks import TensorBoard
+
+
+#download dataframe from cloud object storage
+import sys
+import types
+import pandas as pd
+import numpy as np
+import io
+from botocore.client import Config
+import ibm_boto3
+
+def __iter__(self): return 0
+
+
+###############################################################################
+# Set up working directories for data, model and logs.
+###############################################################################
+model_filename = "med_rnn.h5"
+
+# writing the train model and getting input data
+if environ.get('RESULT_DIR') is not None:
+    output_model_folder = os.path.join(os.environ["RESULT_DIR"], "model")
+    output_model_path = os.path.join(output_model_folder, model_filename)
+else:
+    output_model_folder = "model"
+    output_model_path = os.path.join("model", model_filename)
+
+os.makedirs(output_model_folder, exist_ok=True)
+
+#writing metrics
+if environ.get('JOB_STATE_DIR') is not None:
+    tb_directory = os.path.join(os.environ["JOB_STATE_DIR"], "logs", "tb", "test")
+else:
+    tb_directory = os.path.join("logs", "tb", "test")
+
+os.makedirs(tb_directory, exist_ok=True)
+# tensorboard = TensorBoard(log_dir=tb_directory)
+
+###############################################################################
+
+
+
+bucket_name = 'med-keras-train'
+filename = 'DataFrame2_Experiment.csv'
+
+cos_credentials = {
+  "apikey": "uGNHFCve2sA4ig9DImImRqZ7tM0_BUAPJxzatppEgMox",
+  "cos_hmac_keys": {
+    "access_key_id": "14f9384d2e514fb99f4981e8b8da08c0",
+    "secret_access_key": "4d00b844da86e3491b7c37647a2466dbbc5c737c57fe070c"
+  },
+  "endpoints": "https://cos-service.bluemix.net/endpoints",
+  "iam_apikey_description": "Auto generated apikey during resource-key operation for Instance - crn:v1:bluemix:public:cloud-object-storage:global:a/a8a6d0a0f5f01bb83ffe78c93e506326:2e0ffa1d-6ed8-4884-8e45-78fb7f72af19::",
+  "iam_apikey_name": "auto-generated-apikey-14f9384d-2e51-4fb9-9f49-81e8b8da08c0",
+  "iam_role_crn": "crn:v1:bluemix:public:iam::::serviceRole:Manager",
+  "iam_serviceid_crn": "crn:v1:bluemix:public:iam-identity::a/a8a6d0a0f5f01bb83ffe78c93e506326::serviceid:ServiceId-4e6fdc55-f1f0-4806-953b-65847988652a",
+  "resource_instance_id": "crn:v1:bluemix:public:cloud-object-storage:global:a/a8a6d0a0f5f01bb83ffe78c93e506326:2e0ffa1d-6ed8-4884-8e45-78fb7f72af19::"
+}
+
+api_key = cos_credentials['apikey']
+service_instance_id = cos_credentials['resource_instance_id']
+
+service_endpoint = 'https://s3-api.us-geo.objectstorage.softlayer.net'
+auth_endpoint = 'https://iam.bluemix.net/oidc/token'
+
+cos = ibm_boto3.resource ('s3',
+                         ibm_api_key_id=api_key,
+                         ibm_service_instance_id=service_instance_id,
+                         ibm_auth_endpoint=auth_endpoint,
+                         config=Config(signature_version='oauth'),
+                         endpoint_url=service_endpoint)
+
+obj = cos.Object(bucket_name=bucket_name, key=filename).get()
+df_data_3 = pd.read_csv(io.BytesIO(obj['Body'].read()))
+
+# x and y split
+x = df_data_3.loc[:,['Event_Desc']]
+y = df_data_3.loc[:,['treatment_binary']]
+
+
+
+#train and test split
+from sklearn.model_selection import train_test_split
+
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=21, stratify=y)
+
+
+#Tokenize Sentences
+#Create Sequences
+vocabulary_size = 20000
+tokenizer = Tokenizer(num_words= vocabulary_size)
+tokenizer.fit_on_texts(df_data_3['Event_Desc'])
+
+sequences = tokenizer.texts_to_sequences(df_data_3['Event_Desc'])
+data = pad_sequences(sequences, maxlen=1000)
+
+labels = df_data_3['Treatment Code'].apply(lambda x: 1 if x == 'T000' else 0)
+
+word_index = tokenizer.word_index
+
+#Convert training data to arrays
+x_train = np.array(data[x_train.index])
+x_test = np.array(data[x_test.index])
+y_train = np.array(labels[y_train.index])
+y_test = np.array(labels[y_test.index])
+
+
+#Build a LSTM network
+#Learn embedding layers from the network in the process
+
+#Build architecture of the network
+model = Sequential()
+model.add(Embedding(20000,100,input_length = 1000))
+model.add(LSTM(100,dropout = 0.2, recurrent_dropout = 0.2))
+model.add(Dense(1,activation = 'sigmoid'))
+
+model.compile(loss = 'binary_crossentropy', optimizer = 'adam', metrics = ['accuracy'])
+
+model.fit(x_train, y_train, validation_split=0.4, epochs=10)
+
+#Score the model
+score = model.evaluate(x_test, y_test, verbose=0)
+print('Test loss:', score[0])
+print('Test accuracy:', score[1])
+
+#calculate predictions
+predictions = model.predict(x_test)
+rounded = [round(x[0]) for x in predictions]
